@@ -1725,11 +1725,13 @@ ApplicationWindow {
                         z: 1
 
                     // "Recurrent" view only: project name on its own line
-                    // above the title (Recent actions' layout), left of the
-                    // indent so it reads as a header for the row below it.
+                    // above the title (Recent actions' layout). Aligned to
+                    // titleWrap's actual x, not a guessed indent+checkbox
+                    // width, so it sits over the title itself regardless of
+                    // depth or which controls precede it in mainRow.
                     Label {
                         visible: taskPane.stackedProjectLabel
-                        Layout.leftMargin: (rowItem.depth + 1) * 18
+                        Layout.leftMargin: titleWrap.x
                         text: rowItem.projectName !== ""
                               ? rowItem.projectName : qsTr("W/o project")
                         font.bold: true
@@ -1768,6 +1770,7 @@ ApplicationWindow {
                         // trailing spacer below can take over that job for
                         // the "left aligned" case instead.
                         Item {
+                            id: titleWrap
                             Layout.fillWidth: !settings.deadlineAlignLeft
                             // A plain Item has no content-derived implicit
                             // size, so when it isn't filling (left-aligned
