@@ -235,6 +235,12 @@ pub mod qobject {
         #[cxx_name = "missedCount"]
         fn missed_count(self: &TaskListModel, row: i32) -> i32;
 
+        /// ISO date the recurring task at `row` is next due, or "" when it
+        /// isn't a habit or has no deadline yet - the badge's hover detail.
+        #[qinvokable]
+        #[cxx_name = "nextOccurrenceDate"]
+        fn next_occurrence_date(self: &TaskListModel, row: i32) -> QString;
+
         /// Set (`kind > 0`) or clear (`kind <= 0`) the periodicity on the
         /// task at `row` directly - see `Periodicity::from_parts` for how
         /// `kind`/`n`/`weekdays` combine.
@@ -1008,18 +1014,39 @@ impl qobject::TaskListModel {
         QString::from(text.as_str())
     }
 
-    fn missed_count(&self, row: i32) -> i32 {
-        let Some(node) = self.node_at(row) else {
-            return 0;
-        };
-        let Some(deadline) = node.task.deadline.as_deref() else {
-            return 0;
-        };
-        let Ok(Some(spec)) = db::effective_periodicity(self.db_conn(), &node.task.id) else {
-            return 0;
-        };
+    /// `(periodicity, deadline, today)` for a recurring task's row, or
+    /// `None` when it isn't recurring or has no deadline set yet.
+    fn recurrence_schedule(&self, row: i32) -> Option<(Periodicity, String, String)> {
+        let node = self.node_at(row)?;
+        let deadline = node.task.deadline.clone()?;
+        let spec = db::effective_periodicity(self.db_conn(), &node.task.id)
+            .ok()
+            .flatten()?;
         let today = crate::db::today_string(self.db_conn()).unwrap_or_default();
-        db::missed_occurrences(self.db_conn(), &spec, deadline, &today).unwrap_or(0) as i32
+        Some((spec, deadline, today))
+    }
+
+    fn missed_count(&self, row: i32) -> i32 {
+        let Some((spec, deadline, today)) = self.recurrence_schedule(row) else {
+            return 0;
+        };
+        db::missed_occurrences(self.db_conn(), &spec, &deadline, &today).unwrap_or(0) as i32
+    }
+
+    /// ISO date the recurring task is next due: the current deadline itself
+    /// when it hasn't been missed yet, or the first occurrence still ahead
+    /// of today once it has - the "Overdue: N" badge's hover detail.
+    fn next_occurrence_date(&self, row: i32) -> QString {
+        let Some((spec, deadline, today)) = self.recurrence_schedule(row) else {
+            return QString::default();
+        };
+        let missed = db::missed_occurrences(self.db_conn(), &spec, &deadline, &today).unwrap_or(0);
+        let next = if missed > 0 {
+            db::next_occurrence(self.db_conn(), &spec, &deadline, &today).unwrap_or(deadline)
+        } else {
+            deadline
+        };
+        QString::from(next.as_str())
     }
 
     fn set_periodicity(self: Pin<&mut Self>, row: i32, kind: i32, n: i32, weekdays: &QString) {
