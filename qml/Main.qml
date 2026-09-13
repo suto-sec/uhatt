@@ -1841,6 +1841,8 @@ ApplicationWindow {
                                 (tasks.dataVersion, tasks.effectivePeriodicityText(rowItem.index))
                             readonly property int missedCount:
                                 (tasks.dataVersion, tasks.missedCount(rowItem.index))
+                            readonly property string nextDate:
+                                (tasks.dataVersion, tasks.nextOccurrenceDate(rowItem.index))
                             visible: effText !== ""
                             implicitWidth: recurringRow.implicitWidth + 8
                             implicitHeight: recurringRow.implicitHeight + 4
@@ -1849,6 +1851,11 @@ ApplicationWindow {
                                            palette.highlight.b, 0.15)
                             border.color: palette.highlight
                             border.width: 1
+                            ToolTip.text: qsTr("Next: %1").arg(root.fmtDate(recurringBadge.nextDate))
+                            ToolTip.visible: recurringHover.hovered
+                                && recurringBadge.nextDate !== ""
+
+                            HoverHandler { id: recurringHover }
 
                             Row {
                                 id: recurringRow
