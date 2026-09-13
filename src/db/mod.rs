@@ -584,6 +584,25 @@ pub fn set_task_periodicity(
     Ok(())
 }
 
+/// Mark (or unmark) a task as a habit. A plain per-task flag - unlike
+/// periodicity, it has no "effective"/inherited reading: not every recurring
+/// task is a habit, and a habit's own descendants aren't habits just because
+/// it is.
+pub fn set_task_habit(conn: &Connection, id: &str, habit: bool) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE tasks SET habit = ?2 WHERE id = ?1",
+        params![id, habit],
+    )?;
+    Ok(())
+}
+
+/// Whether `id` is flagged as a habit.
+pub fn task_habit(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT habit FROM tasks WHERE id = ?1", params![id], |r| {
+        r.get(0)
+    })
+}
+
 /// The periodicity that governs `id`: its own if it has one, else the
 /// nearest ancestor's, else `None`. A malformed stored value (shouldn't
 /// happen - nothing free-types this) is treated as absent rather than an
@@ -1881,6 +1900,19 @@ mod tests {
         // grandparent's again.
         set_task_periodicity(&conn, &parent.id, None).unwrap();
         assert_eq!(effective_periodicity(&conn, &kid.id).unwrap(), Some(weekly));
+    }
+
+    #[test]
+    fn task_habit_defaults_false_and_toggles_independently() {
+        let conn = open_in_memory().unwrap();
+        let a = root(&conn, "A");
+        assert!(!task_habit(&conn, &a.id).unwrap());
+
+        set_task_habit(&conn, &a.id, true).unwrap();
+        assert!(task_habit(&conn, &a.id).unwrap());
+
+        set_task_habit(&conn, &a.id, false).unwrap();
+        assert!(!task_habit(&conn, &a.id).unwrap());
     }
 
     #[test]

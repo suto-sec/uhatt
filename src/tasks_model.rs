@@ -236,7 +236,8 @@ pub mod qobject {
         fn missed_count(self: &TaskListModel, row: i32) -> i32;
 
         /// ISO date the recurring task at `row` is next due, or "" when it
-        /// isn't a habit or has no deadline yet - the badge's hover detail.
+        /// has no effective periodicity or no deadline yet - the badge's
+        /// hover detail.
         #[qinvokable]
         #[cxx_name = "nextOccurrenceDate"]
         fn next_occurrence_date(self: &TaskListModel, row: i32) -> QString;
@@ -253,6 +254,18 @@ pub mod qobject {
             n: i32,
             weekdays: &QString,
         );
+
+        /// Whether the task at `row` is flagged as a habit - a separate,
+        /// per-task marker: not every recurring task is a habit, and it has
+        /// no "effective"/inherited reading (contrast `effectivePeriodicityText`).
+        #[qinvokable]
+        #[cxx_name = "isHabit"]
+        fn is_habit(self: &TaskListModel, row: i32) -> bool;
+
+        /// Set or clear the habit flag on the task at `row`.
+        #[qinvokable]
+        #[cxx_name = "setHabit"]
+        fn set_habit(self: Pin<&mut TaskListModel>, row: i32, habit: bool);
 
         /// Collapse an expanded task or expand a collapsed one.
         #[qinvokable]
@@ -1057,6 +1070,24 @@ impl qobject::TaskListModel {
         let spec = Periodicity::from_parts(kind, n, &weekdays);
         if let Err(e) = db::set_task_periodicity(self.db_conn(), &id, spec.as_ref()) {
             eprintln!("uhatt: set periodicity failed: {e}");
+            return;
+        }
+        self.reload();
+    }
+
+    fn is_habit(&self, row: i32) -> bool {
+        let Some(id) = self.id_at(row) else {
+            return false;
+        };
+        db::task_habit(self.db_conn(), &id).unwrap_or(false)
+    }
+
+    fn set_habit(self: Pin<&mut Self>, row: i32, habit: bool) {
+        let Some(id) = self.id_at(row) else {
+            return;
+        };
+        if let Err(e) = db::set_task_habit(self.db_conn(), &id, habit) {
+            eprintln!("uhatt: set habit failed: {e}");
             return;
         }
         self.reload();
