@@ -6,7 +6,7 @@
 
 use rusqlite::Connection;
 
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
 
 /// Number of migration steps the code expects the database to be at.
 pub const COUNT: usize = MIGRATIONS.len();
@@ -129,4 +129,11 @@ ALTER TABLE projects ADD COLUMN parent_project_id TEXT REFERENCES projects(id) O
 // directly on this row.
 const V6: &str = r#"
 ALTER TABLE tasks ADD COLUMN periodicity TEXT;
+"#;
+
+// Not every recurring task is a habit - it's a separate, per-task marker a
+// user sets explicitly (unlike periodicity, this one never has an
+// "effective"/inherited reading - a plain flag, no ancestor walk).
+const V7: &str = r#"
+ALTER TABLE tasks ADD COLUMN habit INTEGER NOT NULL DEFAULT 0;
 "#;

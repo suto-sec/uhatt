@@ -1880,6 +1880,32 @@ ApplicationWindow {
                             }
                         }
 
+                        // Habit: a separate, per-task marker - not every
+                        // recurring task is a habit (issue #1 of this todo
+                        // batch). No hover/dataVersion trickery needed for
+                        // the color/border since the flag itself never
+                        // changes reactively except via a full reload.
+                        Rectangle {
+                            readonly property bool isHabit:
+                                (tasks.dataVersion, tasks.isHabit(rowItem.index))
+                            visible: isHabit
+                            implicitWidth: habitLabel.implicitWidth + 8
+                            implicitHeight: habitLabel.implicitHeight + 4
+                            radius: 3
+                            color: Qt.rgba(0.16, 0.65, 0.27, 0.15)
+                            border.color: "#27ae60"
+                            border.width: 1
+
+                            Label {
+                                id: habitLabel
+                                anchors.centerIn: parent
+                                text: qsTr("H")
+                                font.bold: true
+                                font.pointSize: 9
+                                color: "#27ae60"
+                            }
+                        }
+
                         Rectangle {
                             visible: rowItem.sessionTask
                             implicitWidth: 9
@@ -2233,6 +2259,23 @@ ApplicationWindow {
                                 visible: effText !== ""
                                 text: effText + (missed > 0
                                                   ? qsTr("  ·  %1 overdue").arg(missed) : "")
+                            }
+
+                            // ---- Habit: separate from periodicity - not every
+                            // recurring task is a habit ----
+                            Label {
+                                text: qsTr("Habit:")
+                                font.pointSize: 9
+                                opacity: 0.7
+                            }
+                            Button {
+                                text: qsTr("Habit")
+                                font.pointSize: 8
+                                padding: 3
+                                focusPolicy: Qt.NoFocus
+                                checkable: true
+                                checked: (tasks.dataVersion, tasks.isHabit(rowItem.index))
+                                onToggled: tasks.setHabit(rowItem.index, checked)
                             }
 
                             Label {
