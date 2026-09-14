@@ -2274,6 +2274,11 @@ ApplicationWindow {
                                 padding: 3
                                 focusPolicy: Qt.NoFocus
                                 checkable: true
+                                // A habit implies recurring - disabled rather
+                                // than hidden, so it's clear *why* it can't
+                                // be turned on yet ("Repeats:" is Off above).
+                                enabled: (tasks.dataVersion,
+                                    tasks.effectivePeriodicityText(rowItem.index)) !== ""
                                 checked: (tasks.dataVersion, tasks.isHabit(rowItem.index))
                                 onToggled: tasks.setHabit(rowItem.index, checked)
                             }

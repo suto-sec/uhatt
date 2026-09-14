@@ -132,8 +132,10 @@ ALTER TABLE tasks ADD COLUMN periodicity TEXT;
 "#;
 
 // Not every recurring task is a habit - it's a separate, per-task marker a
-// user sets explicitly (unlike periodicity, this one never has an
-// "effective"/inherited reading - a plain flag, no ancestor walk).
+// user sets explicitly. Unlike periodicity, this column itself never has an
+// "effective"/inherited reading (a plain flag, no ancestor walk) - but a
+// habit still requires recurring, enforced by gating the read/write on the
+// task's effective periodicity at the model layer, not here in storage.
 const V7: &str = r#"
 ALTER TABLE tasks ADD COLUMN habit INTEGER NOT NULL DEFAULT 0;
 "#;

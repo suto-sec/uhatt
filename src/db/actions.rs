@@ -800,6 +800,23 @@ mod tests {
         super::super::create_task(conn, title, Some(parent), None).unwrap()
     }
 
+    // `complete_recurring_task` reads the real wall-clock "today" internally
+    // (unlike the pure `next_occurrence`/`missed_occurrences` tests, which
+    // pass "today" in explicitly) - so a test asserting an exact regenerated
+    // date must anchor its fixture dates to actual today too, not a literal
+    // string that stops being "N days ago" the moment the calendar catches
+    // up to it. Signed so the same helper covers both the fixture deadline
+    // (negative) and the expected regenerated date (positive).
+    fn day_offset(conn: &Connection, n: i64) -> String {
+        let today = super::super::today_string(conn).unwrap();
+        conn.query_row(
+            "SELECT date(?1, ?2)",
+            params![today, format!("{n:+} days")],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
     fn only_action_id(conn: &Connection) -> i64 {
         let ids = list_actions(conn).unwrap();
         assert_eq!(ids.len(), 1, "expected exactly one logged action");
@@ -1131,7 +1148,8 @@ mod tests {
         let p = super::super::create_project(&conn, "Chores").unwrap();
         let habit = super::super::create_task(&conn, "Weekly clean", None, Some(&p.id)).unwrap();
         let sub = child(&conn, "Vacuum", &habit.id);
-        super::super::set_task_deadline(&conn, &habit.id, Some("2026-09-07")).unwrap();
+        let last_week = day_offset(&conn, -7);
+        super::super::set_task_deadline(&conn, &habit.id, Some(&last_week)).unwrap();
         let weekly = Periodicity::EveryWeeks { n: 1 };
         super::super::set_task_periodicity(&conn, &habit.id, Some(&weekly)).unwrap();
 
@@ -1164,7 +1182,12 @@ mod tests {
         assert_eq!(new_habit.task.title, "Weekly clean");
         assert_ne!(new_habit.task.id, habit.id);
         assert_eq!(new_habit.task.project_id, Some(p.id));
-        assert_eq!(new_habit.task.deadline.as_deref(), Some("2026-09-14"));
+        // `advance_schedule` always steps at least once and keeps stepping
+        // while the result is still `<= today`; from a week-ago deadline
+        // that first step lands exactly on today (not yet past it), so it
+        // takes a second step to reach the expected date.
+        let next_week = day_offset(&conn, 7);
+        assert_eq!(new_habit.task.deadline.as_deref(), Some(next_week.as_str()));
         assert_eq!(
             new_habit.task.periodicity.as_deref(),
             Some(weekly.to_stored().as_str())
