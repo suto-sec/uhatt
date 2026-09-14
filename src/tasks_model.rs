@@ -256,8 +256,9 @@ pub mod qobject {
         );
 
         /// Whether the task at `row` is flagged as a habit - a separate,
-        /// per-task marker: not every recurring task is a habit, and it has
-        /// no "effective"/inherited reading (contrast `effectivePeriodicityText`).
+        /// per-task marker: not every recurring task is a habit, but a habit
+        /// must be recurring, so this also reads false once the task's
+        /// effective periodicity is gone even if the stored bit is still set.
         #[qinvokable]
         #[cxx_name = "isHabit"]
         fn is_habit(self: &TaskListModel, row: i32) -> bool;
@@ -1075,17 +1076,29 @@ impl qobject::TaskListModel {
         self.reload();
     }
 
+    /// A habit implies recurring, but not every recurring task is a habit -
+    /// so `isHabit`/`setHabit` both defer to the stored flag *and* the
+    /// task's effective periodicity, read-gated rather than cascade-cleared:
+    /// if a habit's periodicity is later removed (its own, or an ancestor's
+    /// it was inheriting), it silently stops reading as a habit without a
+    /// separate write to clear the now-meaningless stored bit.
     fn is_habit(&self, row: i32) -> bool {
         let Some(id) = self.id_at(row) else {
             return false;
         };
-        db::task_habit(self.db_conn(), &id).unwrap_or(false)
+        if !db::task_habit(self.db_conn(), &id).unwrap_or(false) {
+            return false;
+        }
+        matches!(db::effective_periodicity(self.db_conn(), &id), Ok(Some(_)))
     }
 
     fn set_habit(self: Pin<&mut Self>, row: i32, habit: bool) {
         let Some(id) = self.id_at(row) else {
             return;
         };
+        if habit && !matches!(db::effective_periodicity(self.db_conn(), &id), Ok(Some(_))) {
+            return; // habits must be recurring
+        }
         if let Err(e) = db::set_task_habit(self.db_conn(), &id, habit) {
             eprintln!("uhatt: set habit failed: {e}");
             return;

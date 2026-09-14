@@ -1,8 +1,10 @@
 -- Wipe the app's data and load a spread of test tasks covering every case:
 -- projects and unfiled, nesting 3 deep, descriptions, deadlines (past / today /
 -- near / far), done and not-done, logged time at several tree levels, a
--- nested project, and one habit task per periodicity kind (every case
--- next_occurrence/missed_occurrences/complete_recurring_task handle).
+-- nested project, one recurring task per periodicity kind (every case
+-- next_occurrence/missed_occurrences/complete_recurring_task handle), and a
+-- mix of `habit`-flagged vs. plain recurring tasks (habits are always
+-- recurring, but not every recurring task is a habit).
 --
 --   sqlite3 ~/.local/share/uhatt/uhatt.db < scripts/seed-dev-data.sql
 --
@@ -133,66 +135,74 @@ INSERT INTO time_entries (id, task_id, start_ts, end_ts, source, note, created_a
 -- off what it's for. Mark any of these done in the app to see
 -- `complete_recurring_task` regenerate it - the whole subtree moves to
 -- Finished and a fresh copy takes its place with an advanced deadline.
+--
+-- `habit` (last column) is a separate per-task flag layered on top of
+-- periodicity: every habit here is recurring, but several recurring tasks
+-- deliberately are NOT flagged as habits (admin/work chores vs. personal
+-- routines) - that contrast is the point, not an oversight.
 INSERT INTO tasks
-  (id, project_id, parent_task_id, title, notes, deadline, tracked, status, completed_at, sort_order, created_at, periodicity)
+  (id, project_id, parent_task_id, title, notes, deadline, tracked, status, completed_at, sort_order, created_at, periodicity, habit)
 VALUES
 -- On schedule, not due yet: due tomorrow, completing it early still lands
--- the fresh copy 2 days out from *this* deadline, not from today.
+-- the fresh copy 2 days out from *this* deadline, not from today. A habit.
  ('t-hab-water','p-habits',NULL,'Water the plants','',
   date('now','localtime','+1 day'),0,'todo',NULL,120,datetime('now','localtime','-20 days'),
-  '{"kind":"days","n":2}'),
+  '{"kind":"days","n":2}',1),
 -- Overdue by several occurrences: opening this shows a "missed" count, and
 -- completing it jumps straight to the next upcoming occurrence rather than
--- spawning one task per missed cycle.
+-- spawning one task per missed cycle. A chore, not a habit.
  ('t-hab-trash','p-habits',NULL,'Take out the trash','',
   date('now','localtime','-10 days'),0,'todo',NULL,130,datetime('now','localtime','-40 days'),
-  '{"kind":"days","n":3}'),
--- Due exactly today - also shows up under "Due today".
+  '{"kind":"days","n":3}',0),
+-- Due exactly today - also shows up under "Due today". A chore, not a habit.
  ('t-hab-clean','p-habits',NULL,'Deep clean the kitchen','',
   date('now','localtime'),0,'todo',NULL,140,datetime('now','localtime','-14 days'),
-  '{"kind":"weeks","n":1}'),
+  '{"kind":"weeks","n":1}',0),
 -- Every 3 months, deadline on the 30th: 3 months later is February, so
 -- completing this is the easiest way to see the month-length clamp
 -- (`step_occurrence` landing on the 28th/29th, not overflowing into March).
+-- An admin task, not a habit.
  ('t-hab-insurance','p-habits',NULL,'Pay quarterly insurance',
   'Auto-pay is off for this one - do it manually.',
   '2026-11-30',0,'todo',NULL,150,datetime('now','localtime','-60 days'),
-  '{"kind":"months","n":3}'),
--- Specific weekday (Monday only).
+  '{"kind":"months","n":3}',0),
+-- Specific weekday (Monday only). A work task, not a habit.
  ('t-hab-standup','p-habits',NULL,'Team standup notes','',
   date('now','localtime','weekday 1'),0,'todo',NULL,160,datetime('now','localtime','-20 days'),
-  '{"kind":"weekdays","days":[1]}'),
+  '{"kind":"weekdays","days":[1]}',0),
 -- Specific weekdays, several - and in the nested "Fitness" project, so
--- opening it also exercises the project-nesting sidebar (PR #51).
+-- opening it also exercises the project-nesting sidebar (PR #51). A habit.
  ('t-hab-gym','p-fitness',NULL,'Gym: push / pull / legs','',
   date('now','localtime','weekday 1'),0,'todo',NULL,170,datetime('now','localtime','-20 days'),
-  '{"kind":"weekdays","days":[1,3,5]}'),
--- First day of the month.
+  '{"kind":"weekdays","days":[1,3,5]}',1),
+-- First day of the month. An admin task, not a habit.
  ('t-hab-report','p-habits',NULL,'Submit monthly report','',
   date('now','localtime','start of month','+1 month'),0,'todo',NULL,180,datetime('now','localtime','-20 days'),
-  '{"kind":"first_of_month"}'),
--- Last day of the month.
+  '{"kind":"first_of_month"}',0),
+-- Last day of the month. An admin task, not a habit.
  ('t-hab-closebooks','p-habits',NULL,'Close the books','',
   date('now','localtime','start of month','+1 month','-1 day'),0,'todo',NULL,190,datetime('now','localtime','-20 days'),
-  '{"kind":"last_of_month"}'),
+  '{"kind":"last_of_month"}',0),
 -- No deadline yet - completing it falls back to "today" as the anchor
--- instead of failing or crashing on a NULL `deadline`.
+-- instead of failing or crashing on a NULL `deadline`. A habit.
  ('t-hab-meditate','p-habits',NULL,'Meditate','',
   NULL,0,'todo',NULL,200,datetime('now','localtime','-5 days'),
-  '{"kind":"days","n":1}'),
+  '{"kind":"days","n":1}',1),
 -- A habit with subtasks - completing "Weekly review" regenerates the whole
 -- 3-task subtree in one shot, not just this row. Neither child has its own
--- periodicity; both inherit it from this parent (`effective_periodicity`).
+-- periodicity; both inherit it from this parent (`effective_periodicity`) -
+-- and neither inherits the `habit` flag either, since that never cascades.
  ('t-hab-weekly','p-habits',NULL,'Weekly review','',
   date('now','localtime'),0,'todo',NULL,210,datetime('now','localtime','-14 days'),
-  '{"kind":"weeks","n":1}'),
+  '{"kind":"weeks","n":1}',1),
 -- Already done ahead of the parent - completing "Weekly review" (and later
 -- reverting it) should leave this one done throughout, not flip it back.
  ('t-hab-weekly-cal','p-habits','t-hab-weekly','Review calendar','',
-  NULL,0,'done',datetime('now','localtime','-1 days'),1,datetime('now','localtime','-13 days'),NULL),
+  NULL,0,'done',datetime('now','localtime','-1 days'),1,datetime('now','localtime','-13 days'),NULL,0),
 -- A grandchild two levels below the periodicity, to show inheritance isn't
--- just one hop: neither this nor its parent has periodicity of its own.
+-- just one hop: neither this nor its parent has periodicity of its own, and
+-- neither is separately flagged as a habit despite the parent being one.
  ('t-hab-weekly-plan','p-habits','t-hab-weekly','Plan next week','',
-  NULL,0,'todo',NULL,2,datetime('now','localtime','-13 days'),NULL),
+  NULL,0,'todo',NULL,2,datetime('now','localtime','-13 days'),NULL,0),
  ('t-hab-weekly-priorities','p-habits','t-hab-weekly-plan','Draft priorities','',
-  NULL,0,'todo',NULL,1,datetime('now','localtime','-13 days'),NULL);
+  NULL,0,'todo',NULL,1,datetime('now','localtime','-13 days'),NULL,0);
