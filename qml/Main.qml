@@ -116,6 +116,7 @@ ApplicationWindow {
 
     TaskListModel {
         id: tasks
+        rollupChildProjects: settings.projectRollupChildren
     }
     ProjectListModel {
         id: projects
@@ -713,6 +714,34 @@ ApplicationWindow {
                 Switch {
                     checked: tasks.showDone
                     onToggled: tasks.showDone = checked
+                }
+            }
+
+            // ---- Projects group ----
+            Label {
+                text: qsTr("Projects")
+                font.bold: true
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: 8
+                spacing: 10
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 2
+                    Label { text: qsTr("Show sub-project tasks") }
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("A project's task list also includes every "
+                                   + "sub-project's tasks, recursively.")
+                        font.pointSize: 8
+                        opacity: 0.6
+                        wrapMode: Text.WordWrap
+                    }
+                }
+                Switch {
+                    checked: settings.projectRollupChildren
+                    onToggled: settings.projectRollupChildren = checked
                 }
             }
 
@@ -1562,19 +1591,30 @@ ApplicationWindow {
                 || tasks.projectFilter === "duetoday"
                 || tasks.projectFilter === "recurring"
 
-            // "Recurrent" shows the project name on its own line above the
-            // title (like the Recent actions page) instead of inline-
-            // prefixing the title text - it sits next to the periodicity
-            // badge and deadline, which already crowd the title on this view.
+            // "Recurrent" and a rolled-up project view both show the project
+            // name on its own line above the title (like the Recent actions
+            // page) instead of inline-prefixing the title text - it sits
+            // next to the periodicity badge and deadline, which already
+            // crowd the title on these views. Recurrent labels every row;
+            // a rollup view only labels where the project actually changes
+            // (tasks.projectLabelHere), since a whole subtree usually shares
+            // one project.
             readonly property bool stackedProjectLabel:
                 tasks.projectFilter === "recurring"
+                || (tasks.rollupChildProjects && !taskPane.derivedView
+                    && tasks.projectFilter !== "" && tasks.projectFilter !== "unfiled")
 
             // Time recorded across everything in the current view (a project,
-            // "All tasks", or the project-less ones).
+            // "All tasks", or the project-less ones). On a rolled-up project
+            // view with descendants, a second "incl. sub-projects" figure
+            // follows - viewSubtreeTotalText is blank otherwise.
             Label {
                 Layout.fillWidth: true
                 visible: !taskPane.derivedView && tasks.viewTotalText !== ""
-                text: qsTr("Time invested: %1").arg(tasks.viewTotalText)
+                text: tasks.viewSubtreeTotalText !== ""
+                      ? qsTr("Time invested: %1  ·  incl. sub-projects: %2")
+                            .arg(tasks.viewTotalText).arg(tasks.viewSubtreeTotalText)
+                      : qsTr("Time invested: %1").arg(tasks.viewTotalText)
                 font.pointSize: 9
                 opacity: 0.7
             }
@@ -1724,13 +1764,24 @@ ApplicationWindow {
                         // the other way round - see the comment on `guides`.
                         z: 1
 
-                    // "Recurrent" view only: project name on its own line
-                    // above the title (Recent actions' layout). Aligned to
-                    // titleWrap's actual x, not a guessed indent+checkbox
-                    // width, so it sits over the title itself regardless of
-                    // depth or which controls precede it in mainRow.
+                    // Project name on its own line above the title (Recent
+                    // actions' layout): every row on "Recurrent", only where
+                    // the project actually changes on a rolled-up project
+                    // view (tasks.projectLabelHere - re-evaluated off
+                    // dataVersion, since it's an invokable, not a role).
+                    // viewSubtreeTotalText is only non-empty when this
+                    // project actually has descendants rolled in - without
+                    // that check, a childless project would still get a
+                    // redundant label on its own first row.
+                    // Aligned to titleWrap's actual x, not a guessed
+                    // indent+checkbox width, so it sits over the title
+                    // itself regardless of depth or what precedes it in
+                    // mainRow.
                     Label {
                         visible: taskPane.stackedProjectLabel
+                                 && (tasks.projectFilter === "recurring"
+                                     || (tasks.viewSubtreeTotalText !== ""
+                                         && (tasks.dataVersion, tasks.projectLabelHere(rowItem.index))))
                         Layout.leftMargin: titleWrap.x
                         text: rowItem.projectName !== ""
                               ? rowItem.projectName : qsTr("W/o project")
