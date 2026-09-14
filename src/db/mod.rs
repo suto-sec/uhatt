@@ -294,6 +294,31 @@ pub fn list_task_tree(
     Ok(nodes)
 }
 
+/// [`list_task_tree`] for `project_id`, followed by the same for every
+/// descendant project ([`project_and_descendant_ids`]), back to back in
+/// project order. Each project's own rows keep their own 0-based depth and
+/// branch annotations - [`annotate_branches`] only looks at depth relative to
+/// a project's own rows (a depth-0 row always ends the previous project's
+/// last branch), so concatenating already-annotated subtrees needs no
+/// re-annotation pass. Only used when the user opts into project rollup
+/// (`Settings.projectRollupChildren`); plain [`list_task_tree`] with
+/// `ProjectFilter::Only` remains the default, non-rolled-up path.
+pub fn list_task_tree_with_descendants(
+    conn: &Connection,
+    project_id: &str,
+    include_done: bool,
+) -> rusqlite::Result<Vec<TaskNode>> {
+    let mut all = Vec::new();
+    for id in project_and_descendant_ids(conn, project_id)? {
+        all.extend(list_task_tree(
+            conn,
+            &ProjectFilter::Only(id),
+            include_done,
+        )?);
+    }
+    Ok(all)
+}
+
 /// Every completed task as a flat list (depth 0), most-recently-finished first.
 ///
 /// The "Finished" view is deliberately not a tree: a done task's place in the
@@ -1092,6 +1117,27 @@ pub fn list_project_tree(conn: &Connection) -> rusqlite::Result<Vec<ProjectNode>
     Ok(nodes)
 }
 
+/// `root_id` followed by every descendant project's id, recursively
+/// (archived branches excluded), in the same pre-order sibling-by-name
+/// ordering [`list_project_tree`] uses - the order project task rollup
+/// walks in, so a rolled-up view's row order always matches the sidebar.
+pub fn project_and_descendant_ids(
+    conn: &Connection,
+    root_id: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let sql = "WITH RECURSIVE subtree(id, sort_path) AS (
+                 SELECT id, name COLLATE NOCASE FROM projects WHERE id = ?1
+               UNION ALL
+                 SELECT p.id, s.sort_path || '/' || (p.name COLLATE NOCASE)
+                 FROM projects p JOIN subtree s ON p.parent_project_id = s.id
+                 WHERE p.archived = 0
+             )
+         SELECT id FROM subtree ORDER BY sort_path";
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params![root_id], |r| r.get(0))?;
+    rows.collect()
+}
+
 /// Whether `id` may be re-parented under `new_parent` (or moved to the top
 /// level when `new_parent` is `None`) - mirrors [`can_reparent`] for tasks:
 /// both must exist, they must differ, and `new_parent` must not sit inside
@@ -1512,6 +1558,21 @@ pub fn scope_seconds(conn: &Connection, filter: &ProjectFilter) -> rusqlite::Res
         Some(id) => conn.query_row(&sql, params![id], |r| r.get(0)),
         None => conn.query_row(&sql, [], |r| r.get(0)),
     }
+}
+
+/// Time invested across `project_id`'s own tasks plus every descendant
+/// project's tasks, inclusive - the same id set [`list_task_tree_with_descendants`]
+/// walks, summed with the already-tested [`scope_seconds`] per id, so the
+/// total can never disagree with what a rolled-up view actually lists.
+pub fn scope_seconds_with_descendants(
+    conn: &Connection,
+    project_id: &str,
+) -> rusqlite::Result<i64> {
+    let mut total = 0;
+    for id in project_and_descendant_ids(conn, project_id)? {
+        total += scope_seconds(conn, &ProjectFilter::Only(id))?;
+    }
+    Ok(total)
 }
 
 // --- Time-invested heatmap ------------------------------------------------
@@ -2478,6 +2539,94 @@ mod tests {
         // Moving back to the top level.
         reparent_project(&conn, &b1.id, None).unwrap();
         assert_eq!(get_project(&conn, &b1.id).unwrap().unwrap().parent_id, None);
+    }
+
+    #[test]
+    fn project_and_descendant_ids_walks_the_whole_subtree_pre_order() {
+        let conn = open_in_memory().unwrap();
+        let habits = create_project(&conn, "Habits").unwrap();
+        let fitness = create_project(&conn, "Fitness").unwrap();
+        reparent_project(&conn, &fitness.id, Some(&habits.id)).unwrap();
+        let cardio = create_project(&conn, "Cardio").unwrap();
+        reparent_project(&conn, &cardio.id, Some(&fitness.id)).unwrap();
+        // An unrelated top-level project must not leak in.
+        create_project(&conn, "Learning").unwrap();
+
+        let ids = project_and_descendant_ids(&conn, &habits.id).unwrap();
+        assert_eq!(
+            ids,
+            [habits.id.clone(), fitness.id.clone(), cardio.id.clone()]
+        );
+
+        // A leaf (no children) returns just itself.
+        assert_eq!(
+            project_and_descendant_ids(&conn, &cardio.id).unwrap(),
+            [cardio.id]
+        );
+    }
+
+    #[test]
+    fn list_task_tree_with_descendants_concatenates_each_projects_subtree() {
+        let conn = open_in_memory().unwrap();
+        let habits = create_project(&conn, "Habits").unwrap();
+        let fitness = create_project(&conn, "Fitness").unwrap();
+        reparent_project(&conn, &fitness.id, Some(&habits.id)).unwrap();
+        let water = create_task(&conn, "Water the plants", None, Some(&habits.id)).unwrap();
+        let gym = create_task(&conn, "Gym", None, Some(&fitness.id)).unwrap();
+        // Elsewhere entirely - must not show up.
+        let other_project = create_project(&conn, "Website").unwrap();
+        create_task(&conn, "Unrelated", None, Some(&other_project.id)).unwrap();
+
+        let tree = list_task_tree_with_descendants(&conn, &habits.id, false).unwrap();
+        let shape: Vec<_> = tree
+            .iter()
+            .map(|n| (n.task.title.as_str(), n.depth, n.project_name.as_deref()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("Water the plants", 0, Some("Habits")),
+                ("Gym", 0, Some("Fitness")),
+            ]
+        );
+        assert_eq!(tree[0].task.id, water.id);
+        assert_eq!(tree[1].task.id, gym.id);
+    }
+
+    #[test]
+    fn scope_seconds_with_descendants_sums_each_projects_own_entries() {
+        let conn = open_in_memory().unwrap();
+        let habits = create_project(&conn, "Habits").unwrap();
+        let fitness = create_project(&conn, "Fitness").unwrap();
+        reparent_project(&conn, &fitness.id, Some(&habits.id)).unwrap();
+        let water = create_task(&conn, "Water the plants", None, Some(&habits.id)).unwrap();
+        let gym = create_task(&conn, "Gym", None, Some(&fitness.id)).unwrap();
+        // Elsewhere entirely - must not be swept in.
+        let other_project = create_project(&conn, "Website").unwrap();
+        let unrelated = create_task(&conn, "Unrelated", None, Some(&other_project.id)).unwrap();
+
+        let entry = |task: &str, start: &str, end: &str| {
+            conn.execute(
+                "INSERT INTO time_entries (id, task_id, start_ts, end_ts, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?3)",
+                params![new_id(), task, start, end],
+            )
+            .unwrap();
+        };
+        entry(&water.id, "2026-03-01T09:00:00", "2026-03-01T10:00:00"); // 1h
+        entry(&gym.id, "2026-03-02T09:00:00", "2026-03-02T09:30:00"); // 30m
+        entry(&unrelated.id, "2026-03-03T09:00:00", "2026-03-03T09:15:00"); // 15m
+
+        // Habits rolls up its own entries plus Fitness's.
+        assert_eq!(
+            scope_seconds_with_descendants(&conn, &habits.id).unwrap(),
+            3600 + 1800
+        );
+        // A leaf project's rollup is just its own entries.
+        assert_eq!(
+            scope_seconds_with_descendants(&conn, &fitness.id).unwrap(),
+            1800
+        );
     }
 
     #[test]

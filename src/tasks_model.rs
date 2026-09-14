@@ -85,6 +85,15 @@ pub mod qobject {
         // Time recorded across every task in the current view's scope, e.g.
         // "18h 40m" ("" while on the finished list). Driven by the model.
         #[qproperty(QString, view_total_text, cxx_name = "viewTotalText")]
+        // Time recorded across a project's descendant projects too, inclusive
+        // of its own; only non-"" when `rollupChildProjects` is on and the
+        // current project actually has descendants. Driven by the model.
+        #[qproperty(QString, view_subtree_total_text, cxx_name = "viewSubtreeTotalText")]
+        // A project's task view: false (default) shows only its own tasks;
+        // true also includes every descendant project's tasks, recursively.
+        // Mirrors `Settings.projectRollupChildren` - QML binds it there;
+        // TaskListModel doesn't read Settings directly.
+        #[qproperty(bool, rollup_child_projects, cxx_name = "rollupChildProjects", READ, WRITE = set_rollup_child_projects, NOTIFY)]
         // Multi-select: while on, rows show a tick box for mass delete / revert.
         #[qproperty(bool, selection_mode, cxx_name = "selectionMode", READ, WRITE = set_selection_mode, NOTIFY)]
         // How many rows are ticked. Driven by the model.
@@ -107,6 +116,11 @@ pub mod qobject {
         /// Toggle whether completed tasks appear in the normal views.
         #[cxx_name = "setShowDone"]
         fn set_show_done(self: Pin<&mut TaskListModel>, value: bool);
+
+        /// Toggle whether a project's task view also includes every
+        /// descendant project's tasks.
+        #[cxx_name = "setRollupChildProjects"]
+        fn set_rollup_child_projects(self: Pin<&mut TaskListModel>, value: bool);
 
         /// Enter / leave multi-select mode (leaving clears the selection).
         #[cxx_name = "setSelectionMode"]
@@ -313,6 +327,15 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "countRecurring"]
         fn count_recurring(self: &TaskListModel) -> i32;
+
+        /// Whether the row at `row` should show a stacked project-name label
+        /// above its title - true when its project differs from the row
+        /// immediately before it (or it's the first row). A rolled-up view
+        /// can show consecutive rows from different projects; QML uses this
+        /// to label a project's rows once per group instead of every row.
+        #[qinvokable]
+        #[cxx_name = "projectLabelHere"]
+        fn project_label_here(self: &TaskListModel, row: i32) -> bool;
     }
 
     // QAbstractListModel overrides.
@@ -358,6 +381,10 @@ pub struct TaskListModelRust {
     show_done: bool,
     /// Backs the `viewTotalText` Q_PROPERTY.
     view_total_text: QString,
+    /// Backs the `viewSubtreeTotalText` Q_PROPERTY.
+    view_subtree_total_text: QString,
+    /// Backs the `rollupChildProjects` Q_PROPERTY.
+    rollup_child_projects: bool,
     /// Backs the `selectionMode` Q_PROPERTY.
     selection_mode: bool,
     /// Backs the `selectedCount` Q_PROPERTY.
@@ -504,6 +531,18 @@ impl qobject::TaskListModel {
     /// visible set, all wrapped in a model reset.
     fn reload(mut self: Pin<&mut Self>) {
         let filter_str = self.project_filter.to_string();
+        // Rollup only makes sense on a genuine single-project view - not on
+        // "All tasks"/"Tasks w/o project" (already everything) or one of the
+        // ad-hoc cross-project views below (their own pruning rule already
+        // decides which projects appear).
+        let is_special_view = filter_str == FINISHED
+            || filter_str == DEADLINED
+            || filter_str == DUE_TODAY
+            || filter_str == RECURRING;
+        let rollup = self.rollup_child_projects
+            && !is_special_view
+            && !filter_str.is_empty()
+            && filter_str != "unfiled";
         let tree = if filter_str == FINISHED {
             db::list_finished_tasks(self.db_conn())
         } else if filter_str == DEADLINED {
@@ -512,22 +551,34 @@ impl qobject::TaskListModel {
             db::list_due_today_tree(self.db_conn())
         } else if filter_str == RECURRING {
             db::list_recurring_tree(self.db_conn())
+        } else if rollup {
+            db::list_task_tree_with_descendants(self.db_conn(), &filter_str, self.show_done)
         } else {
             db::list_task_tree(self.db_conn(), &parse_filter(&filter_str), self.show_done)
         }
         .unwrap_or_default();
-        // Time total for the current scope; blank on the ad-hoc views
-        // (finished / deadlined / due-today / recurring) where a scope total
-        // isn't meaningful.
-        let view_total = if filter_str == FINISHED
-            || filter_str == DEADLINED
-            || filter_str == DUE_TODAY
-            || filter_str == RECURRING
-        {
-            String::new()
+        // Time total for the current scope; blank on the ad-hoc views, where
+        // a scope total isn't meaningful. On a rolled-up view, a second
+        // "incl. sub-projects" figure appears alongside the plain one, but
+        // only when the project actually has descendants to include.
+        let (view_total, view_subtree_total) = if is_special_view {
+            (String::new(), String::new())
+        } else if rollup {
+            let own = db::scope_seconds(self.db_conn(), &ProjectFilter::Only(filter_str.clone()))
+                .unwrap_or(0);
+            let descendants =
+                db::project_and_descendant_ids(self.db_conn(), &filter_str).unwrap_or_default();
+            let subtree = if descendants.len() > 1 {
+                let secs =
+                    db::scope_seconds_with_descendants(self.db_conn(), &filter_str).unwrap_or(0);
+                human_hm(secs)
+            } else {
+                String::new()
+            };
+            (human_hm(own), subtree)
         } else {
             let secs = db::scope_seconds(self.db_conn(), &parse_filter(&filter_str)).unwrap_or(0);
-            human_hm(secs)
+            (human_hm(secs), String::new())
         };
 
         let live: HashSet<&str> = tree.iter().map(|n| n.task.id.as_str()).collect();
@@ -559,6 +610,8 @@ impl qobject::TaskListModel {
         }
         self.as_mut()
             .set_view_total_text(QString::from(view_total.as_str()));
+        self.as_mut()
+            .set_view_subtree_total_text(QString::from(view_subtree_total.as_str()));
         self.as_mut().set_selected_count(selected_count);
         let next = self.data_version.wrapping_add(1);
         self.as_mut().set_data_version(next);
@@ -582,6 +635,15 @@ impl qobject::TaskListModel {
         }
         self.as_mut().rust_mut().show_done = value;
         self.as_mut().show_done_changed();
+        self.reload();
+    }
+
+    fn set_rollup_child_projects(mut self: Pin<&mut Self>, value: bool) {
+        if self.rollup_child_projects == value {
+            return;
+        }
+        self.as_mut().rust_mut().rollup_child_projects = value;
+        self.as_mut().rollup_child_projects_changed();
         self.reload();
     }
 
@@ -1152,6 +1214,10 @@ impl qobject::TaskListModel {
             .unwrap_or(0)
     }
 
+    // Deliberately always the project's own count, never rolled up even when
+    // `rollupChildProjects` is on: a descendant project already shows its own
+    // count on its own sidebar row right below, so folding it into the
+    // parent's number here would double-count something already visible.
     fn project_task_count(&self, project_id: &QString) -> i32 {
         let filter = ProjectFilter::Only(project_id.to_string());
         db::list_task_tree(self.db_conn(), &filter, self.show_done)
@@ -1181,6 +1247,16 @@ impl qobject::TaskListModel {
         db::list_recurring_tree(self.db_conn())
             .map(|v| v.len() as i32)
             .unwrap_or(0)
+    }
+
+    fn project_label_here(&self, row: i32) -> bool {
+        if row == 0 {
+            return self.node_at(row).is_some();
+        }
+        let (Some(node), Some(prev)) = (self.node_at(row), self.node_at(row - 1)) else {
+            return false;
+        };
+        prev.project_name != node.project_name
     }
 
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
