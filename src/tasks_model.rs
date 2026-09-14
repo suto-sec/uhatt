@@ -1256,7 +1256,7 @@ impl qobject::TaskListModel {
         let (Some(node), Some(prev)) = (self.node_at(row), self.node_at(row - 1)) else {
             return false;
         };
-        prev.project_name != node.project_name
+        prev.task.project_id != node.task.project_id
     }
 
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
