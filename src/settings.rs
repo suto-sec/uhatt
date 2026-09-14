@@ -41,6 +41,9 @@ pub mod qobject {
         // Task row deadline position: true = right after the title, false
         // (default) = pushed right, just before the timer button.
         #[qproperty(bool, deadline_align_left, cxx_name = "deadlineAlignLeft", READ, WRITE = set_deadline_align_left, NOTIFY)]
+        // A project's task view: false (default) shows only its own tasks;
+        // true also includes every descendant project's tasks, recursively.
+        #[qproperty(bool, project_rollup_children, cxx_name = "projectRollupChildren", READ, WRITE = set_project_rollup_children, NOTIFY)]
         type Settings = super::SettingsRust;
     }
 
@@ -71,6 +74,9 @@ pub mod qobject {
         #[cxx_name = "setDeadlineAlignLeft"]
         fn set_deadline_align_left(self: Pin<&mut Settings>, value: bool);
 
+        #[cxx_name = "setProjectRollupChildren"]
+        fn set_project_rollup_children(self: Pin<&mut Settings>, value: bool);
+
         /// "time left until `iso_date`" per the current setting; "" when the
         /// countdown is off or the date can't be read.
         #[qinvokable]
@@ -90,6 +96,7 @@ pub struct SettingsRust {
     quick_create_indent_tab: bool,
     show_initial_time: bool,
     deadline_align_left: bool,
+    project_rollup_children: bool,
 }
 
 impl Default for SettingsRust {
@@ -107,6 +114,7 @@ impl Default for SettingsRust {
             quick_create_indent_tab: false,
             show_initial_time: true,
             deadline_align_left: false,
+            project_rollup_children: false,
         }
     }
 }
@@ -120,6 +128,7 @@ const DATE_FORMAT_KEY: &str = "date_format";
 const QUICK_CREATE_INDENT_TAB_KEY: &str = "quick_create_indent_tab";
 const SHOW_INITIAL_TIME_KEY: &str = "show_initial_time";
 const DEADLINE_ALIGN_LEFT_KEY: &str = "deadline_align_left";
+const PROJECT_ROLLUP_CHILDREN_KEY: &str = "project_rollup_children";
 
 fn mode_of(value: i32) -> CountdownMode {
     match value {
@@ -157,6 +166,7 @@ impl cxx_qt::Initialize for qobject::Settings {
         let quick_create_indent_tab = read_bool(&conn, QUICK_CREATE_INDENT_TAB_KEY, false);
         let show_initial_time = read_bool(&conn, SHOW_INITIAL_TIME_KEY, true);
         let deadline_align_left = read_bool(&conn, DEADLINE_ALIGN_LEFT_KEY, false);
+        let project_rollup_children = read_bool(&conn, PROJECT_ROLLUP_CHILDREN_KEY, false);
         {
             let mut rust = self.as_mut().rust_mut();
             rust.conn = Some(conn);
@@ -168,6 +178,7 @@ impl cxx_qt::Initialize for qobject::Settings {
             rust.quick_create_indent_tab = quick_create_indent_tab;
             rust.show_initial_time = show_initial_time;
             rust.deadline_align_left = deadline_align_left;
+            rust.project_rollup_children = project_rollup_children;
         }
     }
 }
@@ -274,6 +285,15 @@ impl qobject::Settings {
         self.as_mut().deadline_align_left_changed();
     }
 
+    fn set_project_rollup_children(mut self: Pin<&mut Self>, value: bool) {
+        if self.project_rollup_children == value {
+            return;
+        }
+        self.as_mut().rust_mut().project_rollup_children = value;
+        persist_bool(self.db_conn(), PROJECT_ROLLUP_CHILDREN_KEY, value);
+        self.as_mut().project_rollup_children_changed();
+    }
+
     fn countdown_text(&self, iso_date: &QString) -> QString {
         let text = db::deadline_countdown(
             self.db_conn(),
@@ -297,14 +317,17 @@ mod tests {
         assert!(read_bool(&conn, CROSS_PAST_KEY, true));
         assert!(!read_bool(&conn, HIDE_OTHER_MONTH_KEY, false));
         assert!(read_bool(&conn, SHOW_TASK_COUNT_KEY, true));
+        assert!(!read_bool(&conn, PROJECT_ROLLUP_CHILDREN_KEY, false));
 
         persist_bool(&conn, CROSS_PAST_KEY, false);
         persist_bool(&conn, HIDE_OTHER_MONTH_KEY, true);
         persist_bool(&conn, SHOW_TASK_COUNT_KEY, false);
+        persist_bool(&conn, PROJECT_ROLLUP_CHILDREN_KEY, true);
 
         // Stored value wins over the default, both ways.
         assert!(!read_bool(&conn, CROSS_PAST_KEY, true));
         assert!(read_bool(&conn, HIDE_OTHER_MONTH_KEY, false));
         assert!(!read_bool(&conn, SHOW_TASK_COUNT_KEY, true));
+        assert!(read_bool(&conn, PROJECT_ROLLUP_CHILDREN_KEY, false));
     }
 }
