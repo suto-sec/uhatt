@@ -1376,6 +1376,10 @@ ApplicationWindow {
                             }
                         }
                         MenuItem {
+                            text: qsTr("Add subproject")
+                            onTriggered: projects.addChild(pdel.index, qsTr("New subproject"))
+                        }
+                        MenuItem {
                             text: qsTr("Move to top level")
                             onTriggered: projects.reparent(pdel.index, "")
                         }

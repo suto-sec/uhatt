@@ -1026,15 +1026,21 @@ fn row_to_project(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     })
 }
 
-/// Create a project. `name` is trimmed; the caller rejects blanks.
-pub fn create_project(conn: &Connection, name: &str) -> rusqlite::Result<Project> {
+/// Create a project. `name` is trimmed; the caller rejects blanks. `parent_id`
+/// nests it under an existing project, or leaves it at the top level when
+/// `None`.
+pub fn create_project(
+    conn: &Connection,
+    name: &str,
+    parent_id: Option<&str>,
+) -> rusqlite::Result<Project> {
     let id = new_id();
     conn.execute(
         &format!(
-            "INSERT INTO projects (id, name, created_at)
-             VALUES (?1, ?2, {NOW})"
+            "INSERT INTO projects (id, name, parent_project_id, created_at)
+             VALUES (?1, ?2, ?3, {NOW})"
         ),
-        params![id, name.trim()],
+        params![id, name.trim(), parent_id],
     )?;
     Ok(get_project(conn, &id)?.expect("row just inserted"))
 }
@@ -1856,7 +1862,7 @@ mod tests {
     #[test]
     fn reparent_moves_subtree_and_carries_project() {
         let conn = open_in_memory().unwrap();
-        let proj = create_project(&conn, "P").unwrap();
+        let proj = create_project(&conn, "P", None).unwrap();
         let a = create_task(&conn, "A", None, Some(&proj.id)).unwrap();
         let b = root(&conn, "B"); // no project
         let b1 = child(&conn, "B1", &b.id);
@@ -2418,7 +2424,7 @@ mod tests {
     #[test]
     fn project_filter_scopes_the_tree_and_subtasks_inherit() {
         let conn = open_in_memory().unwrap();
-        let work = create_project(&conn, "Work").unwrap();
+        let work = create_project(&conn, "Work", None).unwrap();
 
         let filed = create_task(&conn, "filed", None, Some(&work.id)).unwrap();
         let sub = create_task(&conn, "sub", Some(&filed.id), None).unwrap();
@@ -2456,7 +2462,7 @@ mod tests {
     #[test]
     fn deleting_a_project_unfiles_its_tasks() {
         let conn = open_in_memory().unwrap();
-        let p = create_project(&conn, "Temp").unwrap();
+        let p = create_project(&conn, "Temp", None).unwrap();
         let t = create_task(&conn, "t", None, Some(&p.id)).unwrap();
 
         delete_project(&conn, &p.id).unwrap();
@@ -2468,10 +2474,10 @@ mod tests {
     #[test]
     fn project_tree_is_preordered_with_depth_and_child_flags() {
         let conn = open_in_memory().unwrap();
-        let a = create_project(&conn, "A").unwrap();
-        let a1 = create_project(&conn, "A1").unwrap();
+        let a = create_project(&conn, "A", None).unwrap();
+        let a1 = create_project(&conn, "A1", None).unwrap();
         reparent_project(&conn, &a1.id, Some(&a.id)).unwrap();
-        create_project(&conn, "B").unwrap();
+        create_project(&conn, "B", None).unwrap();
 
         let tree = list_project_tree(&conn).unwrap();
         let shape: Vec<_> = tree
@@ -2482,14 +2488,29 @@ mod tests {
     }
 
     #[test]
+    fn create_project_can_be_nested_directly_under_a_parent() {
+        let conn = open_in_memory().unwrap();
+        let a = create_project(&conn, "A", None).unwrap();
+        let a1 = create_project(&conn, "A1", Some(&a.id)).unwrap();
+
+        assert_eq!(a1.parent_id.as_deref(), Some(a.id.as_str()));
+        let tree = list_project_tree(&conn).unwrap();
+        let shape: Vec<_> = tree
+            .iter()
+            .map(|n| (n.project.name.as_str(), n.depth))
+            .collect();
+        assert_eq!(shape, [("A", 0), ("A1", 1)]);
+    }
+
+    #[test]
     fn project_tree_guide_flags_track_ancestor_branches() {
         let conn = open_in_memory().unwrap();
-        let a = create_project(&conn, "A").unwrap();
-        let a1 = create_project(&conn, "A1").unwrap();
+        let a = create_project(&conn, "A", None).unwrap();
+        let a1 = create_project(&conn, "A1", None).unwrap();
         reparent_project(&conn, &a1.id, Some(&a.id)).unwrap();
-        let a2 = create_project(&conn, "A2").unwrap();
+        let a2 = create_project(&conn, "A2", None).unwrap();
         reparent_project(&conn, &a2.id, Some(&a.id)).unwrap();
-        create_project(&conn, "B").unwrap();
+        create_project(&conn, "B", None).unwrap();
 
         let tree = list_project_tree(&conn).unwrap();
         let by: Vec<_> = tree
@@ -2510,9 +2531,9 @@ mod tests {
     #[test]
     fn reparent_project_guards_cycles_and_promotes_children_on_delete() {
         let conn = open_in_memory().unwrap();
-        let a = create_project(&conn, "A").unwrap();
-        let b = create_project(&conn, "B").unwrap();
-        let b1 = create_project(&conn, "B1").unwrap();
+        let a = create_project(&conn, "A", None).unwrap();
+        let b = create_project(&conn, "B", None).unwrap();
+        let b1 = create_project(&conn, "B1", None).unwrap();
         reparent_project(&conn, &b1.id, Some(&b.id)).unwrap();
 
         // Cycle / self guards, same rules as tasks.
@@ -2544,13 +2565,13 @@ mod tests {
     #[test]
     fn project_and_descendant_ids_walks_the_whole_subtree_pre_order() {
         let conn = open_in_memory().unwrap();
-        let habits = create_project(&conn, "Habits").unwrap();
-        let fitness = create_project(&conn, "Fitness").unwrap();
+        let habits = create_project(&conn, "Habits", None).unwrap();
+        let fitness = create_project(&conn, "Fitness", None).unwrap();
         reparent_project(&conn, &fitness.id, Some(&habits.id)).unwrap();
-        let cardio = create_project(&conn, "Cardio").unwrap();
+        let cardio = create_project(&conn, "Cardio", None).unwrap();
         reparent_project(&conn, &cardio.id, Some(&fitness.id)).unwrap();
         // An unrelated top-level project must not leak in.
-        create_project(&conn, "Learning").unwrap();
+        create_project(&conn, "Learning", None).unwrap();
 
         let ids = project_and_descendant_ids(&conn, &habits.id).unwrap();
         assert_eq!(
@@ -2568,13 +2589,13 @@ mod tests {
     #[test]
     fn list_task_tree_with_descendants_concatenates_each_projects_subtree() {
         let conn = open_in_memory().unwrap();
-        let habits = create_project(&conn, "Habits").unwrap();
-        let fitness = create_project(&conn, "Fitness").unwrap();
+        let habits = create_project(&conn, "Habits", None).unwrap();
+        let fitness = create_project(&conn, "Fitness", None).unwrap();
         reparent_project(&conn, &fitness.id, Some(&habits.id)).unwrap();
         let water = create_task(&conn, "Water the plants", None, Some(&habits.id)).unwrap();
         let gym = create_task(&conn, "Gym", None, Some(&fitness.id)).unwrap();
         // Elsewhere entirely - must not show up.
-        let other_project = create_project(&conn, "Website").unwrap();
+        let other_project = create_project(&conn, "Website", None).unwrap();
         create_task(&conn, "Unrelated", None, Some(&other_project.id)).unwrap();
 
         let tree = list_task_tree_with_descendants(&conn, &habits.id, false).unwrap();
@@ -2596,13 +2617,13 @@ mod tests {
     #[test]
     fn scope_seconds_with_descendants_sums_each_projects_own_entries() {
         let conn = open_in_memory().unwrap();
-        let habits = create_project(&conn, "Habits").unwrap();
-        let fitness = create_project(&conn, "Fitness").unwrap();
+        let habits = create_project(&conn, "Habits", None).unwrap();
+        let fitness = create_project(&conn, "Fitness", None).unwrap();
         reparent_project(&conn, &fitness.id, Some(&habits.id)).unwrap();
         let water = create_task(&conn, "Water the plants", None, Some(&habits.id)).unwrap();
         let gym = create_task(&conn, "Gym", None, Some(&fitness.id)).unwrap();
         // Elsewhere entirely - must not be swept in.
-        let other_project = create_project(&conn, "Website").unwrap();
+        let other_project = create_project(&conn, "Website", None).unwrap();
         let unrelated = create_task(&conn, "Unrelated", None, Some(&other_project.id)).unwrap();
 
         let entry = |task: &str, start: &str, end: &str| {
@@ -2632,7 +2653,7 @@ mod tests {
     #[test]
     fn move_task_carries_its_subtree() {
         let conn = open_in_memory().unwrap();
-        let p = create_project(&conn, "P").unwrap();
+        let p = create_project(&conn, "P", None).unwrap();
         let parent = root(&conn, "parent");
         let kid = child(&conn, "kid", &parent.id);
 
@@ -2873,7 +2894,7 @@ mod tests {
     #[test]
     fn time_totals_roll_up_over_subtree_and_scope() {
         let conn = open_in_memory().unwrap();
-        let proj = create_project(&conn, "P").unwrap();
+        let proj = create_project(&conn, "P", None).unwrap();
         let parent = create_task(&conn, "parent", None, Some(&proj.id)).unwrap();
         let kid = create_task(&conn, "kid", Some(&parent.id), None).unwrap();
         let grandkid = create_task(&conn, "grandkid", Some(&kid.id), None).unwrap();
@@ -2967,7 +2988,7 @@ mod tests {
     #[test]
     fn heatmap_scopes_and_counts_by_day() {
         let conn = open_in_memory().unwrap();
-        let proj = create_project(&conn, "P").unwrap();
+        let proj = create_project(&conn, "P", None).unwrap();
         let parent = create_task(&conn, "parent", None, Some(&proj.id)).unwrap();
         let kid = create_task(&conn, "kid", Some(&parent.id), None).unwrap();
         let other = root(&conn, "other");
@@ -3097,8 +3118,8 @@ mod tests {
     #[test]
     fn projects_listed_by_name_case_insensitive() {
         let conn = open_in_memory().unwrap();
-        create_project(&conn, "  banana ").unwrap();
-        create_project(&conn, "Apple").unwrap();
+        create_project(&conn, "  banana ", None).unwrap();
+        create_project(&conn, "Apple", None).unwrap();
         let names: Vec<_> = list_project_tree(&conn)
             .unwrap()
             .into_iter()

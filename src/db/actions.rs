@@ -534,7 +534,7 @@ pub fn import_quick_creation(
     tasks: &[crate::domain::QuickCreateTask],
 ) -> rusqlite::Result<ImportOutcome> {
     let tx = conn.unchecked_transaction()?;
-    let project = super::create_project(&tx, project_name)?;
+    let project = super::create_project(&tx, project_name, None)?;
 
     let mut stack: Vec<String> = Vec::new();
     let mut created_ids: Vec<String> = Vec::new();
@@ -826,7 +826,7 @@ mod tests {
     #[test]
     fn project_label_reflects_current_project_or_unfiled() {
         let conn = super::super::open_in_memory().unwrap();
-        let p = super::super::create_project(&conn, "Work").unwrap();
+        let p = super::super::create_project(&conn, "Work", None).unwrap();
 
         let in_project =
             super::super::create_task(&conn, "quarterly report", None, Some(&p.id)).unwrap();
@@ -851,7 +851,7 @@ mod tests {
     #[test]
     fn project_label_falls_back_to_snapshot_for_a_deleted_task() {
         let conn = super::super::open_in_memory().unwrap();
-        let p = super::super::create_project(&conn, "Work").unwrap();
+        let p = super::super::create_project(&conn, "Work", None).unwrap();
         let t = super::super::create_task(&conn, "gone", None, Some(&p.id)).unwrap();
 
         capture_and_log_delete(&conn, &t.id).unwrap();
@@ -942,7 +942,7 @@ mod tests {
     #[test]
     fn set_project_reverts_whole_subtree() {
         let conn = super::super::open_in_memory().unwrap();
-        let p = super::super::create_project(&conn, "Work").unwrap();
+        let p = super::super::create_project(&conn, "Work", None).unwrap();
         let parent = root(&conn, "parent");
         let kid = child(&conn, "kid", &parent.id);
 
@@ -1145,7 +1145,7 @@ mod tests {
     #[test]
     fn complete_recurring_task_regenerates_the_whole_subtree_in_place() {
         let conn = super::super::open_in_memory().unwrap();
-        let p = super::super::create_project(&conn, "Chores").unwrap();
+        let p = super::super::create_project(&conn, "Chores", None).unwrap();
         let habit = super::super::create_task(&conn, "Weekly clean", None, Some(&p.id)).unwrap();
         let sub = child(&conn, "Vacuum", &habit.id);
         let last_week = day_offset(&conn, -7);

@@ -65,6 +65,12 @@ pub mod qobject {
         #[qinvokable]
         fn add(self: Pin<&mut ProjectListModel>, name: &QString) -> QString;
 
+        /// Create a sub-project nested under the project at `row` and return
+        /// its id (empty string on failure / blank name).
+        #[qinvokable]
+        #[cxx_name = "addChild"]
+        fn add_child(self: Pin<&mut ProjectListModel>, row: i32, name: &QString) -> QString;
+
         /// Rename the project at `row`.
         #[qinvokable]
         fn rename(self: Pin<&mut ProjectListModel>, row: i32, name: &QString);
@@ -228,7 +234,7 @@ impl qobject::ProjectListModel {
         if name.is_empty() {
             return QString::default();
         }
-        match db::create_project(self.db_conn(), name) {
+        match db::create_project(self.db_conn(), name, None) {
             Ok(project) => {
                 let id = QString::from(project.id.as_str());
                 self.as_mut().reload();
@@ -236,6 +242,30 @@ impl qobject::ProjectListModel {
             }
             Err(e) => {
                 eprintln!("uhatt: create project failed: {e}");
+                QString::default()
+            }
+        }
+    }
+
+    fn add_child(mut self: Pin<&mut Self>, row: i32, name: &QString) -> QString {
+        let name = name.to_string();
+        let name = name.trim();
+        if name.is_empty() {
+            return QString::default();
+        }
+        let Some(parent_id) = self.id_at(row) else {
+            return QString::default();
+        };
+        match db::create_project(self.db_conn(), name, Some(&parent_id)) {
+            Ok(project) => {
+                let id = QString::from(project.id.as_str());
+                // Make sure the new sub-project is visible.
+                self.as_mut().rust_mut().collapsed.remove(&parent_id);
+                self.as_mut().reload();
+                id
+            }
+            Err(e) => {
+                eprintln!("uhatt: create sub-project failed: {e}");
                 QString::default()
             }
         }
