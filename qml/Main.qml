@@ -1811,6 +1811,7 @@ ApplicationWindow {
                         }
 
                         CheckBox {
+                            id: doneBox
                             padding: 0
                             checked: rowItem.done
                             onToggled: tasks.setDone(rowItem.index, checked)
@@ -2385,7 +2386,22 @@ ApplicationWindow {
                         // behind it), hiding the guides/expand box entirely.
 
                         anchors.left: parent.left
+                        // Shifted by the gap between the end of the indent
+                        // grid and this row's own checkbox centre, so the
+                        // whole guides+expander drawing - grid-aligned
+                        // internally - lands with each depth's expand box
+                        // centred under the checkbox one level up (the
+                        // ancestor line above it then runs straight through
+                        // that same checkbox centre too). Derived live from
+                        // doneBox's real geometry rather than a hardcoded
+                        // indicator width, so it's correct under whatever
+                        // Controls style is active (Basic in tests, Breeze
+                        // on the user's own session - see
+                        // qml-zorder-basic-vs-breeze in memory for why that
+                        // gap matters here).
                         anchors.leftMargin: rowItem.leftPadding
+                                             + (doneBox.x + doneBox.width / 2)
+                                             - ((rowItem.depth + 1) * 18 + 9)
                         anchors.top: parent.top
                         anchors.bottom: parent.bottom
                         width: (rowItem.depth + 1) * 18
