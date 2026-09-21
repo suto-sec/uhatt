@@ -1197,21 +1197,21 @@ impl qobject::TaskListModel {
 
     // ---- Sidebar counts ---------------------------------------------------
     //
-    // Each re-runs the same query the corresponding view reloads with, rather
-    // than a separate `COUNT(*)`, so a count can never drift from what the
-    // view it labels actually shows. Cheap enough at this app's scale; QML
-    // re-evaluates these on every `dataVersion` bump instead of caching them.
+    // Each calls a dedicated `db::count_*`/`count_task_tree` function that
+    // shares its view's own CTE (kept in lock-step by a parity test, not by
+    // sharing source text) but counts directly instead of building full
+    // `TaskNode`s - a count can still never drift from what the view it
+    // labels actually shows, without paying for row materialization,
+    // `PROJECT_NAME_SUBQUERY`, or branch annotation on every `dataVersion`
+    // bump QML re-evaluates these on.
 
     fn count_all(&self) -> i32 {
-        db::list_task_tree(self.db_conn(), &ProjectFilter::All, self.show_done)
-            .map(|v| v.len() as i32)
-            .unwrap_or(0)
+        db::count_task_tree(self.db_conn(), &ProjectFilter::All, self.show_done).unwrap_or(0) as i32
     }
 
     fn count_unfiled(&self) -> i32 {
-        db::list_task_tree(self.db_conn(), &ProjectFilter::Unfiled, self.show_done)
-            .map(|v| v.len() as i32)
-            .unwrap_or(0)
+        db::count_task_tree(self.db_conn(), &ProjectFilter::Unfiled, self.show_done).unwrap_or(0)
+            as i32
     }
 
     // Deliberately always the project's own count, never rolled up even when
@@ -1220,33 +1220,23 @@ impl qobject::TaskListModel {
     // parent's number here would double-count something already visible.
     fn project_task_count(&self, project_id: &QString) -> i32 {
         let filter = ProjectFilter::Only(project_id.to_string());
-        db::list_task_tree(self.db_conn(), &filter, self.show_done)
-            .map(|v| v.len() as i32)
-            .unwrap_or(0)
+        db::count_task_tree(self.db_conn(), &filter, self.show_done).unwrap_or(0) as i32
     }
 
     fn count_due_today(&self) -> i32 {
-        db::list_due_today_tree(self.db_conn())
-            .map(|v| v.len() as i32)
-            .unwrap_or(0)
+        db::count_due_today(self.db_conn()).unwrap_or(0) as i32
     }
 
     fn count_deadlined(&self) -> i32 {
-        db::list_deadlined_tree(self.db_conn())
-            .map(|v| v.len() as i32)
-            .unwrap_or(0)
+        db::count_deadlined(self.db_conn()).unwrap_or(0) as i32
     }
 
     fn count_finished(&self) -> i32 {
-        db::list_finished_tasks(self.db_conn())
-            .map(|v| v.len() as i32)
-            .unwrap_or(0)
+        db::count_finished(self.db_conn()).unwrap_or(0) as i32
     }
 
     fn count_recurring(&self) -> i32 {
-        db::list_recurring_tree(self.db_conn())
-            .map(|v| v.len() as i32)
-            .unwrap_or(0)
+        db::count_recurring(self.db_conn()).unwrap_or(0) as i32
     }
 
     fn project_label_here(&self, row: i32) -> bool {

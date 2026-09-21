@@ -294,6 +294,49 @@ pub fn list_task_tree(
     Ok(nodes)
 }
 
+/// `list_task_tree(conn, filter, include_done).len()`, without building a
+/// single [`TaskNode`] to get there - same `subtree` CTE (same predicates,
+/// same done-branch truncation), just counted directly instead of joined
+/// back to `tasks` for its columns and annotated. `subtree` is a lossless
+/// 1:1 relation to the final joined rows (every `task_id` in it came from an
+/// existing task, in the base case or the recursive step), so its row count
+/// already *is* the answer - this exists purely so a sidebar count doesn't
+/// pay for `PROJECT_NAME_SUBQUERY`, branch annotation, or row materialization
+/// it never uses. Kept in exact lock-step with [`list_task_tree`]'s own CTE
+/// by the parity test next to it, not by sharing source text.
+pub fn count_task_tree(
+    conn: &Connection,
+    filter: &ProjectFilter,
+    include_done: bool,
+) -> rusqlite::Result<i64> {
+    let (root_predicate, bind): (&str, Option<&str>) = match filter {
+        ProjectFilter::All => ("1", None),
+        ProjectFilter::Unfiled => ("project_id IS NULL", None),
+        ProjectFilter::Only(id) => ("project_id = ?1", Some(id.as_str())),
+    };
+    let (root_done, t_done) = if include_done {
+        ("", "")
+    } else {
+        ("AND status <> 'done'", "AND t.status <> 'done'")
+    };
+    let sql = format!(
+        "WITH RECURSIVE subtree(task_id) AS (
+             SELECT id
+             FROM tasks WHERE parent_task_id IS NULL AND {root_predicate} {root_done}
+           UNION ALL
+             SELECT t.id
+             FROM tasks t JOIN subtree s ON t.parent_task_id = s.task_id
+             WHERE 1 {t_done}
+         )
+         SELECT COUNT(*) FROM subtree"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    match bind {
+        Some(id) => stmt.query_row(params![id], |r| r.get(0)),
+        None => stmt.query_row([], |r| r.get(0)),
+    }
+}
+
 /// [`list_task_tree`] for `project_id`, followed by the same for every
 /// descendant project ([`project_and_descendant_ids`]), back to back in
 /// project order. Each project's own rows keep their own 0-based depth and
@@ -335,6 +378,16 @@ pub fn list_finished_tasks(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>>
     rows.collect()
 }
 
+/// `list_finished_tasks(conn).len()`, as a plain indexable `WHERE`, no CTE
+/// needed - "Finished" is already a flat, unordered-by-tree list.
+pub fn count_finished(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM tasks WHERE status = 'done'",
+        [],
+        |r| r.get(0),
+    )
+}
+
 /// The task tree pruned to deadline-bearing work: a task is kept when it has a
 /// deadline of its own, or any descendant does (so the chain from the root down
 /// stays connected). Done tasks truncate a branch, exactly as in
@@ -355,23 +408,22 @@ pub fn list_deadlined_tree(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>>
                  WHERE t.parent_task_id IS NOT NULL AND t.status <> 'done'
              ),
              subtree(task_id, depth, sort_path) AS (
-                 SELECT id, 0, printf('%020.6f', sort_order)
-                 FROM tasks
-                 WHERE parent_task_id IS NULL AND status <> 'done'
-                   AND id IN (SELECT id FROM keep)
+                 SELECT tasks.id, 0, printf('%020.6f', tasks.sort_order)
+                 FROM tasks JOIN keep ON keep.id = tasks.id
+                 WHERE tasks.parent_task_id IS NULL AND tasks.status <> 'done'
                UNION ALL
                  SELECT t.id, s.depth + 1,
                         s.sort_path || '/' || printf('%020.6f', t.sort_order)
-                 FROM tasks t JOIN subtree s ON t.parent_task_id = s.task_id
+                 FROM tasks t
+                      JOIN subtree s ON t.parent_task_id = s.task_id
+                      JOIN keep ON keep.id = t.id
                  WHERE t.status <> 'done'
-                   AND t.id IN (SELECT id FROM keep)
              )
          SELECT {TASK_COLUMNS},
                 subtree.depth,
-                EXISTS(SELECT 1 FROM tasks c
+                EXISTS(SELECT 1 FROM tasks c JOIN keep ON keep.id = c.id
                        WHERE c.parent_task_id = tasks.id
-                         AND c.status <> 'done'
-                         AND c.id IN (SELECT id FROM keep)),
+                         AND c.status <> 'done'),
                 (tasks.deadline IS NOT NULL
                     AND tasks.deadline < {TODAY}
                     AND tasks.status <> 'done'),
@@ -384,6 +436,34 @@ pub fn list_deadlined_tree(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>>
     let mut nodes: Vec<TaskNode> = rows.collect::<rusqlite::Result<_>>()?;
     annotate_branches(&mut nodes);
     Ok(nodes)
+}
+
+/// `list_deadlined_tree(conn).len()` - see [`count_task_tree`] for why this
+/// is worth having: same `keep`/`subtree` CTEs, counted directly instead of
+/// joined back to `tasks` and annotated.
+pub fn count_deadlined(conn: &Connection) -> rusqlite::Result<i64> {
+    let sql = "WITH RECURSIVE
+             keep(id) AS (
+                 SELECT id FROM tasks
+                 WHERE deadline IS NOT NULL AND status <> 'done'
+               UNION
+                 SELECT t.parent_task_id
+                 FROM tasks t JOIN keep k ON t.id = k.id
+                 WHERE t.parent_task_id IS NOT NULL AND t.status <> 'done'
+             ),
+             subtree(task_id) AS (
+                 SELECT tasks.id
+                 FROM tasks JOIN keep ON keep.id = tasks.id
+                 WHERE tasks.parent_task_id IS NULL AND tasks.status <> 'done'
+               UNION ALL
+                 SELECT t.id
+                 FROM tasks t
+                      JOIN subtree s ON t.parent_task_id = s.task_id
+                      JOIN keep ON keep.id = t.id
+                 WHERE t.status <> 'done'
+             )
+         SELECT COUNT(*) FROM subtree";
+    conn.query_row(sql, [], |r| r.get(0))
 }
 
 /// The task tree pruned to tasks due the current local day: a task is kept
@@ -402,23 +482,22 @@ pub fn list_due_today_tree(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>>
                  WHERE t.parent_task_id IS NOT NULL AND t.status <> 'done'
              ),
              subtree(task_id, depth, sort_path) AS (
-                 SELECT id, 0, printf('%020.6f', sort_order)
-                 FROM tasks
-                 WHERE parent_task_id IS NULL AND status <> 'done'
-                   AND id IN (SELECT id FROM keep)
+                 SELECT tasks.id, 0, printf('%020.6f', tasks.sort_order)
+                 FROM tasks JOIN keep ON keep.id = tasks.id
+                 WHERE tasks.parent_task_id IS NULL AND tasks.status <> 'done'
                UNION ALL
                  SELECT t.id, s.depth + 1,
                         s.sort_path || '/' || printf('%020.6f', t.sort_order)
-                 FROM tasks t JOIN subtree s ON t.parent_task_id = s.task_id
+                 FROM tasks t
+                      JOIN subtree s ON t.parent_task_id = s.task_id
+                      JOIN keep ON keep.id = t.id
                  WHERE t.status <> 'done'
-                   AND t.id IN (SELECT id FROM keep)
              )
          SELECT {TASK_COLUMNS},
                 subtree.depth,
-                EXISTS(SELECT 1 FROM tasks c
+                EXISTS(SELECT 1 FROM tasks c JOIN keep ON keep.id = c.id
                        WHERE c.parent_task_id = tasks.id
-                         AND c.status <> 'done'
-                         AND c.id IN (SELECT id FROM keep)),
+                         AND c.status <> 'done'),
                 (tasks.deadline IS NOT NULL
                     AND tasks.deadline < {TODAY}
                     AND tasks.status <> 'done'),
@@ -431,6 +510,34 @@ pub fn list_due_today_tree(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>>
     let mut nodes: Vec<TaskNode> = rows.collect::<rusqlite::Result<_>>()?;
     annotate_branches(&mut nodes);
     Ok(nodes)
+}
+
+/// `list_due_today_tree(conn).len()` - see [`count_task_tree`].
+pub fn count_due_today(conn: &Connection) -> rusqlite::Result<i64> {
+    let sql = format!(
+        "WITH RECURSIVE
+             keep(id) AS (
+                 SELECT id FROM tasks
+                 WHERE deadline = {TODAY} AND status <> 'done'
+               UNION
+                 SELECT t.parent_task_id
+                 FROM tasks t JOIN keep k ON t.id = k.id
+                 WHERE t.parent_task_id IS NOT NULL AND t.status <> 'done'
+             ),
+             subtree(task_id) AS (
+                 SELECT tasks.id
+                 FROM tasks JOIN keep ON keep.id = tasks.id
+                 WHERE tasks.parent_task_id IS NULL AND tasks.status <> 'done'
+               UNION ALL
+                 SELECT t.id
+                 FROM tasks t
+                      JOIN subtree s ON t.parent_task_id = s.task_id
+                      JOIN keep ON keep.id = t.id
+                 WHERE t.status <> 'done'
+             )
+         SELECT COUNT(*) FROM subtree"
+    );
+    conn.query_row(&sql, [], |r| r.get(0))
 }
 
 /// The task tree pruned to periodicity-bearing work: a task is kept when it
@@ -450,23 +557,22 @@ pub fn list_recurring_tree(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>>
                  WHERE t.parent_task_id IS NOT NULL AND t.status <> 'done'
              ),
              subtree(task_id, depth, sort_path) AS (
-                 SELECT id, 0, printf('%020.6f', sort_order)
-                 FROM tasks
-                 WHERE parent_task_id IS NULL AND status <> 'done'
-                   AND id IN (SELECT id FROM keep)
+                 SELECT tasks.id, 0, printf('%020.6f', tasks.sort_order)
+                 FROM tasks JOIN keep ON keep.id = tasks.id
+                 WHERE tasks.parent_task_id IS NULL AND tasks.status <> 'done'
                UNION ALL
                  SELECT t.id, s.depth + 1,
                         s.sort_path || '/' || printf('%020.6f', t.sort_order)
-                 FROM tasks t JOIN subtree s ON t.parent_task_id = s.task_id
+                 FROM tasks t
+                      JOIN subtree s ON t.parent_task_id = s.task_id
+                      JOIN keep ON keep.id = t.id
                  WHERE t.status <> 'done'
-                   AND t.id IN (SELECT id FROM keep)
              )
          SELECT {TASK_COLUMNS},
                 subtree.depth,
-                EXISTS(SELECT 1 FROM tasks c
+                EXISTS(SELECT 1 FROM tasks c JOIN keep ON keep.id = c.id
                        WHERE c.parent_task_id = tasks.id
-                         AND c.status <> 'done'
-                         AND c.id IN (SELECT id FROM keep)),
+                         AND c.status <> 'done'),
                 (tasks.deadline IS NOT NULL
                     AND tasks.deadline < {TODAY}
                     AND tasks.status <> 'done'),
@@ -479,6 +585,32 @@ pub fn list_recurring_tree(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>>
     let mut nodes: Vec<TaskNode> = rows.collect::<rusqlite::Result<_>>()?;
     annotate_branches(&mut nodes);
     Ok(nodes)
+}
+
+/// `list_recurring_tree(conn).len()` - see [`count_task_tree`].
+pub fn count_recurring(conn: &Connection) -> rusqlite::Result<i64> {
+    let sql = "WITH RECURSIVE
+             keep(id) AS (
+                 SELECT id FROM tasks
+                 WHERE periodicity IS NOT NULL AND status <> 'done'
+               UNION
+                 SELECT t.parent_task_id
+                 FROM tasks t JOIN keep k ON t.id = k.id
+                 WHERE t.parent_task_id IS NOT NULL AND t.status <> 'done'
+             ),
+             subtree(task_id) AS (
+                 SELECT tasks.id
+                 FROM tasks JOIN keep ON keep.id = tasks.id
+                 WHERE tasks.parent_task_id IS NULL AND tasks.status <> 'done'
+               UNION ALL
+                 SELECT t.id
+                 FROM tasks t
+                      JOIN subtree s ON t.parent_task_id = s.task_id
+                      JOIN keep ON keep.id = t.id
+                 WHERE t.status <> 'done'
+             )
+         SELECT COUNT(*) FROM subtree";
+    conn.query_row(sql, [], |r| r.get(0))
 }
 
 /// A task that has a deadline, for the calendar / agenda page.
@@ -1766,7 +1898,6 @@ pub fn heatmap(
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn root(conn: &Connection, title: &str) -> Task {
         create_task(conn, title, None, None).unwrap()
     }
@@ -2195,6 +2326,42 @@ mod tests {
     }
 
     #[test]
+    fn deadlined_tree_lists_a_shared_ancestor_once_even_via_two_kept_children() {
+        // `subtree`'s recursive CTE now joins against `keep` instead of using
+        // `id IN (SELECT id FROM keep)` (a perf fix - the IN form was ~30x
+        // slower under this app's bundled SQLite on a few hundred rows). That
+        // rewrite is only safe because `keep` is itself deduplicated (`UNION`,
+        // not `UNION ALL`): a JOIN could re-introduce a duplicate row per
+        // matching `keep` entry if it weren't. Pin it with a parent reachable
+        // through two separately-deadlined children.
+        let conn = open_in_memory().unwrap();
+        let a = root(&conn, "A"); // no deadline of its own
+        let a1 = child(&conn, "A1", &a.id);
+        let a2 = child(&conn, "A2", &a.id);
+        set_task_deadline(&conn, &a1.id, Some("2099-01-01")).unwrap();
+        set_task_deadline(&conn, &a2.id, Some("2099-02-01")).unwrap();
+
+        let tree = list_deadlined_tree(&conn).unwrap();
+        let titles: Vec<_> = tree.iter().map(|n| n.task.title.as_str()).collect();
+        assert_eq!(titles, ["A", "A1", "A2"]);
+        assert!(tree[0].has_children);
+        assert_eq!(count_deadlined(&conn).unwrap() as usize, tree.len());
+    }
+
+    #[test]
+    fn deadlined_tree_has_children_false_when_the_only_child_is_pruned() {
+        let conn = open_in_memory().unwrap();
+        let e = root(&conn, "E");
+        set_task_deadline(&conn, &e.id, Some("2099-01-01")).unwrap();
+        child(&conn, "F", &e.id); // no deadline anywhere under it -> pruned
+
+        let tree = list_deadlined_tree(&conn).unwrap();
+        let titles: Vec<_> = tree.iter().map(|n| n.task.title.as_str()).collect();
+        assert_eq!(titles, ["E"]);
+        assert!(!tree[0].has_children);
+    }
+
+    #[test]
     fn due_today_tree_keeps_only_todays_deadlines_and_their_ancestors() {
         let conn = open_in_memory().unwrap();
         let today = date_at(&conn, "'+0 days'");
@@ -2241,6 +2408,68 @@ mod tests {
         let tree = list_recurring_tree(&conn).unwrap();
         let titles: Vec<_> = tree.iter().map(|n| n.task.title.as_str()).collect();
         assert_eq!(titles, ["A", "A1"]);
+    }
+
+    #[test]
+    fn view_counts_match_their_list_functions_row_count() {
+        // Each `count_*`/`count_task_tree` is a separately-written query, not
+        // shared source with its `list_*` counterpart (see their doc
+        // comments) - this is the safety net that catches the two from
+        // silently drifting apart instead.
+        let conn = open_in_memory().unwrap();
+
+        let p = create_project(&conn, "P", None).unwrap();
+        let a = root(&conn, "A");
+        let a1 = child(&conn, "A1", &a.id);
+        set_task_deadline(&conn, &a1.id, Some("2099-01-01")).unwrap();
+        set_task_periodicity(&conn, &a.id, Some(&Periodicity::EveryDays { n: 3 })).unwrap();
+        set_task_project(&conn, &a.id, Some(&p.id)).unwrap();
+        let done = root(&conn, "Done");
+        set_task_status(&conn, &done.id, TaskStatus::Done).unwrap();
+        let today = date_at(&conn, "'+0 days'");
+        let b = root(&conn, "B");
+        set_task_deadline(&conn, &b.id, Some(&today)).unwrap();
+
+        assert_eq!(
+            count_task_tree(&conn, &ProjectFilter::All, false).unwrap() as usize,
+            list_task_tree(&conn, &ProjectFilter::All, false)
+                .unwrap()
+                .len()
+        );
+        assert_eq!(
+            count_task_tree(&conn, &ProjectFilter::All, true).unwrap() as usize,
+            list_task_tree(&conn, &ProjectFilter::All, true)
+                .unwrap()
+                .len()
+        );
+        assert_eq!(
+            count_task_tree(&conn, &ProjectFilter::Unfiled, false).unwrap() as usize,
+            list_task_tree(&conn, &ProjectFilter::Unfiled, false)
+                .unwrap()
+                .len()
+        );
+        assert_eq!(
+            count_task_tree(&conn, &ProjectFilter::Only(p.id.clone()), false).unwrap() as usize,
+            list_task_tree(&conn, &ProjectFilter::Only(p.id), false)
+                .unwrap()
+                .len()
+        );
+        assert_eq!(
+            count_deadlined(&conn).unwrap() as usize,
+            list_deadlined_tree(&conn).unwrap().len()
+        );
+        assert_eq!(
+            count_due_today(&conn).unwrap() as usize,
+            list_due_today_tree(&conn).unwrap().len()
+        );
+        assert_eq!(
+            count_recurring(&conn).unwrap() as usize,
+            list_recurring_tree(&conn).unwrap().len()
+        );
+        assert_eq!(
+            count_finished(&conn).unwrap() as usize,
+            list_finished_tasks(&conn).unwrap().len()
+        );
     }
 
     #[test]
