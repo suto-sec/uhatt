@@ -1718,6 +1718,19 @@ ApplicationWindow {
                     readonly property bool running: rowItem.sessionTask && !timer.paused
                     readonly property bool paused: rowItem.sessionTask && timer.paused
 
+                    // Per-depth indent grid width, driven by the row's own
+                    // CheckBox so a kid's expand box (drawn by `guides`,
+                    // below) has room to sit centred under the checkbox one
+                    // level up *and* keep a real gap before its own checkbox
+                    // - both by construction, not by guessing a pixel
+                    // number for whatever Controls style is active. 18 is a
+                    // floor (don't shrink below the original grid for a
+                    // style with a narrow indicator); `doneBox.indicator`
+                    // is always non-null once the control exists, `? :`
+                    // only guards the brief pre-completion window.
+                    readonly property real indentUnit: Math.max(18,
+                        (doneBox.indicator ? doneBox.indicator.width : 0) / 2 + 10.5)
+
                     // Click opens an info panel; renaming is deliberate (double-
                     // click the title, the ⋯ menu, or click the title while the
                     // panel is already open).
@@ -1806,8 +1819,8 @@ ApplicationWindow {
                         // continues past the row runs unbroken through the
                         // delegate padding and an open info panel.
                         Item {
-                            Layout.preferredWidth: (rowItem.depth + 1) * 18
-                            Layout.minimumWidth: (rowItem.depth + 1) * 18
+                            Layout.preferredWidth: (rowItem.depth + 1) * rowItem.indentUnit
+                            Layout.minimumWidth: (rowItem.depth + 1) * rowItem.indentUnit
                         }
 
                         CheckBox {
@@ -2387,24 +2400,33 @@ ApplicationWindow {
 
                         anchors.left: parent.left
                         // Shifted by the gap between the end of the indent
-                        // grid and this row's own checkbox centre, so the
-                        // whole guides+expander drawing - grid-aligned
-                        // internally - lands with each depth's expand box
-                        // centred under the checkbox one level up (the
-                        // ancestor line above it then runs straight through
-                        // that same checkbox centre too). Derived live from
-                        // doneBox's real geometry rather than a hardcoded
-                        // indicator width, so it's correct under whatever
-                        // Controls style is active (Basic in tests, Breeze
-                        // on the user's own session - see
+                        // grid and this row's own checkbox *indicator*
+                        // centre (not the CheckBox's full width - a style
+                        // can pad the indicator away from x:0, which the
+                        // first version of this fix missed), so the whole
+                        // guides+expander drawing - grid-aligned internally
+                        // on `rowItem.indentUnit`, not a fixed 18 - lands
+                        // with each depth's expand box centred under the
+                        // checkbox one level up (the ancestor line above it
+                        // then runs straight through that same indicator
+                        // centre too). Derived live from doneBox's real
+                        // geometry so it's correct under whatever Controls
+                        // style is active (Basic in tests, Breeze on the
+                        // user's own session - see
                         // qml-zorder-basic-vs-breeze in memory for why that
-                        // gap matters here).
+                        // gap matters here). `indentUnit` itself grows with
+                        // the indicator's width so there's always a real
+                        // gap before this row's own checkbox, not just
+                        // whatever happened to be left over.
                         anchors.leftMargin: rowItem.leftPadding
-                                             + (doneBox.x + doneBox.width / 2)
-                                             - ((rowItem.depth + 1) * 18 + 9)
+                                             + (doneBox.x
+                                                + (doneBox.indicator
+                                                   ? doneBox.indicator.x + doneBox.indicator.width / 2
+                                                   : doneBox.width / 2))
+                                             - (rowItem.depth + 1.5) * rowItem.indentUnit
                         anchors.top: parent.top
                         anchors.bottom: parent.bottom
-                        width: (rowItem.depth + 1) * 18
+                        width: (rowItem.depth + 1) * rowItem.indentUnit
 
                         readonly property color ink: palette.text
                         readonly property real fade: 0.35
@@ -2415,6 +2437,16 @@ ApplicationWindow {
                         // A line that continues also covers the gap to the next
                         // row, so the guide never breaks between rows.
                         readonly property real span: height + list.spacing
+                        // How far the elbow below has to reach, in an
+                        // ancestor column that's `indentUnit` wide, to meet
+                        // the box column's left edge (which sits at
+                        // `indentUnit / 2 - 6.5`, centred in its own,
+                        // possibly-wider column) - derived the same way the
+                        // fixed "11" this replaces was, just not assuming
+                        // `indentUnit` is 18. The "6.5"/"15.5" here are half
+                        // the box's own 13px size - change the box's
+                        // width/height below and this needs the same edit.
+                        readonly property real elbowReach: 1.5 * indentUnit - 15.5
 
                         // Ancestor guide columns.
                         Repeater {
@@ -2425,15 +2457,15 @@ ApplicationWindow {
                                     index === rowItem.depth - 1
                                 readonly property bool carries:
                                     rowItem.branchMask.charAt(index) === "1"
-                                x: index * 18
-                                width: 18
+                                x: index * rowItem.indentUnit
+                                width: rowItem.indentUnit
                                 height: guides.height
 
                                 // Vertical guide. The connector column always
                                 // drops in from above to meet this row; it
                                 // carries on down only if a sibling follows.
                                 Rectangle {
-                                    x: 9
+                                    x: rowItem.indentUnit / 2
                                     width: 1
                                     color: guides.ink
                                     opacity: guides.fade
@@ -2445,9 +2477,9 @@ ApplicationWindow {
                                 // Elbow into this row.
                                 Rectangle {
                                     visible: parent.connector
-                                    x: 9
+                                    x: rowItem.indentUnit / 2
                                     y: guides.mid
-                                    width: 11
+                                    width: guides.elbowReach
                                     height: 1
                                     color: guides.ink
                                     opacity: guides.fade
@@ -2458,14 +2490,14 @@ ApplicationWindow {
                         // Collapse/expand column.
                         Item {
                             visible: rowItem.hasChildren
-                            x: rowItem.depth * 18
-                            width: 18
+                            x: rowItem.depth * rowItem.indentUnit
+                            width: rowItem.indentUnit
                             height: guides.height
 
                             // Stub from the box down to the first child's guide.
                             Rectangle {
                                 visible: rowItem.expanded
-                                x: 9
+                                x: rowItem.indentUnit / 2
                                 width: 1
                                 y: guides.mid + 7
                                 height: guides.span - (guides.mid + 7)
@@ -2474,9 +2506,11 @@ ApplicationWindow {
                             }
                             // The box: a "-" bar always, plus a "|" bar when
                             // collapsed (making a "+"). Same ink as the guides
-                            // - only the hover tint sets it apart.
+                            // - only the hover tint sets it apart. Centred in
+                            // the column (which may be wider than 18px) so
+                            // it stays under the ancestor guide line above.
                             Rectangle {
-                                x: 2.5
+                                x: rowItem.indentUnit / 2 - 6.5
                                 y: guides.mid - 6.5
                                 width: 13
                                 height: 13
