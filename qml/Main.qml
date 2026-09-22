@@ -1265,6 +1265,11 @@ ApplicationWindow {
                         readonly property real fade: 0.35
                         readonly property real mid: pdel.topPadding + pRow.height / 2
                         readonly property real span: height + projectList.spacing
+                        // The box's own size - one place to change it, since
+                        // the leaf-row line extension below derives from it
+                        // too (see the task tree's identical `guides` for
+                        // the full reasoning).
+                        readonly property real boxSize: 13
 
                         Repeater {
                             model: pdel.depth
@@ -1288,11 +1293,21 @@ ApplicationWindow {
                                             ? (parent.carries ? pguides.span : pguides.mid)
                                             : (parent.carries ? pguides.span : 0)
                                 }
+                                // A leaf has no box (the collapse/expand
+                                // column below is `visible: pdel.hasChildren`)
+                                // for this elbow to stop at, so it would
+                                // otherwise end a full box-width too soon,
+                                // leaving an oversized gap before the
+                                // project name. The box is centred in its
+                                // column, so extending by its own width
+                                // reaches its *right* edge instead of its
+                                // left - the same trailing gap the box
+                                // itself leaves before the row's content.
                                 Rectangle {
                                     visible: parent.connector
                                     x: 7.5
                                     y: pguides.mid
-                                    width: 9
+                                    width: 9 + (pdel.hasChildren ? 0 : pguides.boxSize)
                                     height: 1
                                     color: pguides.ink
                                     opacity: pguides.fade
@@ -1316,10 +1331,10 @@ ApplicationWindow {
                                 opacity: pguides.fade
                             }
                             Rectangle {
-                                x: 1.5
-                                y: pguides.mid - 6.5
-                                width: 13
-                                height: 13
+                                x: (16 - pguides.boxSize) / 2
+                                y: pguides.mid - pguides.boxSize / 2
+                                width: pguides.boxSize
+                                height: pguides.boxSize
                                 radius: 2
                                 color: "transparent"
                                 border.width: 1
@@ -2460,16 +2475,23 @@ ApplicationWindow {
                         // A line that continues also covers the gap to the next
                         // row, so the guide never breaks between rows.
                         readonly property real span: height + list.spacing
+                        // The box's own size (width and height, it's square) -
+                        // one place to change it, since elbowReach below and
+                        // the leaf-row extension both derive from it.
+                        readonly property real boxSize: 13
                         // How far the elbow below has to reach, in an
                         // ancestor column that's `indentUnit` wide, to meet
-                        // the box column's left edge (which sits at
-                        // `indentUnit / 2 - 6.5`, centred in its own,
-                        // possibly-wider column) - derived the same way the
-                        // fixed "11" this replaces was, just not assuming
-                        // `indentUnit` is 18. The "6.5"/"15.5" here are half
-                        // the box's own 13px size - change the box's
-                        // width/height below and this needs the same edit.
-                        readonly property real elbowReach: 1.5 * indentUnit - 15.5
+                        // the box column's left edge. The elbow starts at
+                        // this column's own centre (`indentUnit / 2`, where
+                        // the vertical guide line sits); the box - centred
+                        // in the *next* column - starts at that column's
+                        // centre minus half its own size
+                        // (`indentUnit / 2 - boxSize / 2`). One column further
+                        // right is `+ indentUnit`, so the total reach is
+                        // `indentUnit - boxSize / 2`: exact for any
+                        // `indentUnit`, not just the fixed-18px grid this
+                        // replaced.
+                        readonly property real elbowReach: indentUnit - boxSize / 2
 
                         // Ancestor guide columns.
                         Repeater {
@@ -2497,12 +2519,24 @@ ApplicationWindow {
                                             ? (parent.carries ? guides.span : guides.mid)
                                             : (parent.carries ? guides.span : 0)
                                 }
-                                // Elbow into this row.
+                                // Elbow into this row. A leaf has no box to
+                                // stop at (the collapse/expand column below
+                                // is `visible: rowItem.hasChildren`), so the
+                                // line would otherwise stop at the box's
+                                // *left* edge with nothing there - a gap the
+                                // full box width too wide before the
+                                // checkbox. The box sits centred in its
+                                // column, so its right edge (where the line
+                                // should stop instead) is exactly one
+                                // `boxSize` further out than its left edge -
+                                // reproducing the same trailing gap before
+                                // the checkbox that the box itself leaves.
                                 Rectangle {
                                     visible: parent.connector
                                     x: rowItem.indentUnit / 2
                                     y: guides.mid
                                     width: guides.elbowReach
+                                           + (rowItem.hasChildren ? 0 : guides.boxSize)
                                     height: 1
                                     color: guides.ink
                                     opacity: guides.fade
@@ -2533,10 +2567,10 @@ ApplicationWindow {
                             // the column (which may be wider than 18px) so
                             // it stays under the ancestor guide line above.
                             Rectangle {
-                                x: rowItem.indentUnit / 2 - 6.5
-                                y: guides.mid - 6.5
-                                width: 13
-                                height: 13
+                                x: rowItem.indentUnit / 2 - guides.boxSize / 2
+                                y: guides.mid - guides.boxSize / 2
+                                width: guides.boxSize
+                                height: guides.boxSize
                                 radius: 2
                                 color: "transparent"
                                 border.width: 1
