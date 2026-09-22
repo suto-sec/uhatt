@@ -1696,6 +1696,20 @@ ApplicationWindow {
                 clip: true
                 model: tasks
                 spacing: 2
+                // Every full reload() (project switch, most edits) is a
+                // beginResetModel/endResetModel, which without this
+                // destroys and recreates every visible delegate Item -
+                // and on the Breeze/Plasma style each new Item's Kirigami
+                // PlatformTheme attached-property resolution does real
+                // QObject::connect() work (confirmed via `perf`: >20% of
+                // CPU during a view switch was QObjectPrivate::connectImpl
+                // under exactly this call path). Pooling instead of
+                // recreating cuts that cost. The one piece of delegate
+                // state that doesn't self-heal via a role rebind -
+                // rowItem.editing - is reset in ListView.onReused below;
+                // everything else it reads (title, infoOpen, timeText) is
+                // already a binding or re-fires off one.
+                reuseItems: true
 
                 delegate: ItemDelegate {
                     id: rowItem
@@ -1737,6 +1751,15 @@ ApplicationWindow {
                     readonly property bool infoOpen: rowItem.id !== ""
                                                      && rowItem.id === list.openTaskId
                     property bool editing: false
+
+                    // Pooled delegates (ListView.reuseItems) keep every
+                    // plain QML property across a reuse - only bindings
+                    // re-evaluate off the rebound required properties.
+                    // `editing` is the one piece of state here that isn't
+                    // a binding, so a row left mid-rename would otherwise
+                    // hand edit mode to whatever unrelated task the pooled
+                    // Item gets reused for next.
+                    ListView.onReused: rowItem.editing = false
 
                     function startEdit() {
                         list.openTaskId = rowItem.id
